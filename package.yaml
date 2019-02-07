@@ -1,0 +1,16 @@
+name: rastermizer
+
+dependencies:
+  - base
+  - bytestring
+  - lens
+  - linear
+
+ghc-options:
+  - -O2
+  - -threaded
+  - -Wall
+
+executable:
+  main: Main.hs
+  source-dirs: src
