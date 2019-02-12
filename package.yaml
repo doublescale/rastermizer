@@ -3,6 +3,7 @@ name: rastermizer
 dependencies:
   - base
   - bytestring
+  - containers
   - lens
   - linear
 

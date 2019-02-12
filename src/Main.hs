@@ -1,25 +1,23 @@
--- TODO: use terminal size to configure projection
--- TODO: load OBJ
--- TODO: use Unicode blocks for drawing, full RGB color
---       consider Map, mapKeys for collapsing two pixel rows
+-- TODO: full RGB color
 -- TODO: fill triangles
 
 {-# LANGUAGE NumDecimals #-}
-{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE ViewPatterns #-}
 
-module Main where
+module Main (main) where
 
 import Control.Applicative
+import Control.Arrow ((>>>))
 import Control.Concurrent
 import Control.Exception
 import Control.Lens
 import Control.Monad
-import qualified Data.ByteString.Char8 as BS
-import Data.Char
-import Data.List
+import qualified Data.Map.Strict as Map
+import GHC.Word
 import Linear
 import System.IO
+
+import TermControl
 
 idQuat :: Quaternion Double
 idQuat = Quaternion 1 0
@@ -28,11 +26,12 @@ main :: IO ()
 main = do
   hSetEcho stdin False
   hSetBuffering stdin NoBuffering
+  termSize <- getTermSize
   bracket_ enableMouse disableMouse $
     bracket_ hideCursor showCursor $ do
       velVar <- newMVar idQuat
       _ <- forkIO (mouseHandler velVar)
-      animateCube velVar
+      animateCube termSize velVar
 
 mouseHandler :: MVar (Quaternion Double) -> IO ()
 mouseHandler velVar = go Nothing
@@ -48,28 +47,15 @@ mouseHandler velVar = go Nothing
       axisAngle (unit _y) ( 0.01 * dx) *
       axisAngle (unit _x) (-0.02 * dy)
 
-readMouse :: IO (Int, V2 Int)
-readMouse = do
-  code <- getUpto (`elem` ['m', 'M'])
-  let [status, col, row] = map read
-                           . filter (not . null)
-                           . map (filter isDigit)
-                           . groupBy (\_ y -> isDigit y)
-                           $ code
-  pure (status, V2 col row)
-
-animateCube :: MVar (Quaternion Double) -> IO ()
-animateCube velVar = go idQuat
+animateCube :: V2 Int -> MVar (Quaternion Double) -> IO ()
+animateCube termSize velVar = go idQuat
   where
     go rotState = do
       newRot <- modifyMVar velVar (\v -> pure (dampen v, v * rotState))
-      putRotatedCube newRot
+      putRotatedCube termSize newRot
       threadDelay 3e4
       go newRot
     dampen v = pow v 0.8
-
-putAt :: String -> V2 Int -> IO ()
-putAt s (V2 col row) = csi (show row ++ ";" ++ show col ++ "H" ++ s)
 
 traceLine :: (Additive v, Foldable v) => v Double -> v Double -> [v Double]
 traceLine s e =
@@ -77,34 +63,64 @@ traceLine s e =
   where
     se = e ^-^ s
     n = maximum (fmap abs se)
-    d = se ^/ n
+    d = se ^/ (1e-9 + n)
 
 traceEdges :: (Additive v, Foldable v) => [(v Double, v Double)] -> [v Double]
 traceEdges = concatMap (uncurry traceLine)
 
-showPoint :: V3 Double -> (String, V2 Int)
-showPoint v = ([symbol], round <$> view _xy v)
-  where
-    depth = view _z v
-    symbol | depth <  0.1 = '#'
-           | depth <  0.5 = 'X'
-           | depth <  0.7 = 'x'
-           | otherwise    = '.'
-
-putRotatedCube :: Quaternion Double -> IO ()
-putRotatedCube rotation = do
+putRotatedCube :: V2 Int -> Quaternion Double -> IO ()
+putRotatedCube termSize rotation = do
   clearScreen
-  mapM_ (uncurry putAt . showPoint)
-    . sortOn (negate . view _z)
+  mapM_ (uncurry putAt . (\(p, c) -> (c, p)))
+    . filter (isVisible . view _1)
+    . mergePoints
     . traceEdges
-    . over (each . both)
-      ( screenTrafo
-        . perspProject
-        . subtract (3 *^ unit _z)
-        . rotate rotation
-      )
-    $ cubeEdges
+    . concatMap (\x ->
+        over (each . both) (screenTrafo termSize)
+        . filter (all (inRange (-1) 1) . toListOf (both . _z))
+        . over (each . both)
+          ( perspProject termSize
+            . subtract (3 *^ unit _z)
+            . rotate (pow rotation x)
+            . (^* x)
+          )
+        $ cubeEdges
+     ) $ [0, 0.25 .. 1]
   hFlush stdout
+  where
+    isVisible p = and (liftA2 (>) p (V2 0 0))
+                  && and (liftA2 (<=) p termSize)
+
+inRange :: Ord a => a -> a -> a -> Bool
+inRange lo hi x = x > lo && x < hi
+
+data HalfChar
+  = Top (V3 Word8)
+  | Bottom (V3 Word8)
+  | TopBottom (V3 Word8) (V3 Word8)
+  deriving (Show)
+
+instance Semigroup HalfChar where
+  Top x <> Bottom y = TopBottom x y
+  Bottom x <> Top y = TopBottom y x
+  _ <> h            = h
+
+showHalfChar :: HalfChar -> String
+showHalfChar (Top tc) = withBgFgCol tc 0 "▄"
+showHalfChar (Bottom bc) = withBgFgCol 0 bc "▄"
+showHalfChar (TopBottom tc bc) = withBgFgCol tc bc "▄"
+
+mergePoints :: [V3 Double] -> [(V2 Int, String)]
+mergePoints =
+  map (\(V3 x y z) -> (fmap round (V2 x y), z))
+  >>> Map.fromListWith min
+  >>> Map.mapWithKey
+      (\(V2 _ y) d -> (if even y then Top else Bottom) (depthCol d))
+  >>> Map.mapKeysWith (<>) (over _y (`div` 2))
+  >>> Map.toList
+  >>> over (each . _2) showHalfChar
+  where
+    depthCol d = pure $ round (255 * 0.5 * (1 - d))
 
 -- (-1,-1,-1) to (1,1,1)
 cubeEdges :: Num a => [(V3 a, V3 a)]
@@ -114,30 +130,17 @@ cubeEdges =
   . join (liftA2 (,))
   $ liftA3 V3 [0,1] [0,1] [0,1::Int]
 
-perspMat :: M44 Double
-perspMat = perspective (pi/2) 1 1 5
+perspProject :: V2 Int -> V3 Double -> V3 Double
+perspProject (V2 w h) v = normalizePoint (perspMat !* point v)
+  where
+    perspMat :: M44 Double
+    perspMat = perspective fovX ratio 1.2 5
+    fovX | ratio >= 1 = 2 * atan 1
+         | otherwise  = 2 * atan (1 / ratio)
+    ratio = 0.5 * fromIntegral w / fromIntegral h
 
-perspProject :: V3 Double -> V3 Double
-perspProject v = normalizePoint (perspMat !* point v)
-
-screenTrafo :: R2 v => v Double -> v Double
-screenTrafo = over _xy $ \v -> (v + V2 1 1) * V2 2 1 ^* 30
-
-csi :: String -> IO ()
-csi x = putStr ("\ESC[" ++ x)
-
-clearScreen, enableMouse, disableMouse, hideCursor, showCursor :: IO ()
-
-clearScreen = csi "2J"
-
-enableMouse = csi "?1002h" >> csi "?1006h"
-disableMouse = csi "?1006l" >> csi "?1002l"
-
-hideCursor = csi "?25l"
-showCursor = csi "?25h"
-
-getUpto :: (Char -> Bool) -> IO [Char]
-getUpto p = do
-  [c] <- BS.unpack <$> BS.hGet stdin 1
-  rest <- if p c then pure [] else getUpto p
-  pure (c : rest)
+screenTrafo :: R2 v => V2 Int -> v Double -> v Double
+screenTrafo termSize =
+  over _xy $ \v -> (v + V2 1 1)
+                   * (fmap fromIntegral termSize * V2 0.5 1)
+                   + V2 1 1
