@@ -14,7 +14,6 @@ import qualified Data.ByteString.Char8 as BS
 import Data.Char
 import Data.Foldable
 import Data.List
-import GHC.Word
 import Linear
 import System.IO
 
@@ -31,14 +30,15 @@ parseCsiNumbers = map read
                 . map (filter isDigit)
                 . groupBy (\_ y -> isDigit y)
 
-putAt :: String -> V2 Int -> IO ()
-putAt s p = moveCursor p *> putStr s
+putAt :: V2 Int -> String -> IO ()
+putAt p s = moveCursor p *> putStr s
 
-withBgFgCol :: V3 Word8 -> V3 Word8 -> String -> String
+withBgFgCol :: V3 Double -> V3 Double -> String -> String
 withBgFgCol bg fg x =
   concat ["\ESC[48;2;", showRGB bg, ";38;2;", showRGB fg, "m", x, "\ESC[0m"]
   where
-    showRGB = intercalate ";" . toList . fmap show
+    showRGB = intercalate ";" . toList
+              . fmap (show @Int . max 0 . min 255 . round . (* 255))
 
 moveCursor :: V2 Int -> IO ()
 moveCursor (V2 col row) = csi (show row ++ ";" ++ show col ++ "H")

@@ -1,16 +1,38 @@
 name: rastermizer
+version: 0.1.0
+synopsis: View 3D models in the terminal
+license: MIT
+license-file: LICENSE
+author: doublescale
+maintainer: doublescale@tutanota.com
 
 dependencies:
+  - attoparsec
   - base
   - bytestring
   - containers
+  - errors
+  - hxt
   - lens
   - linear
+  - optparse-applicative
+  - split
+  - vector
 
 ghc-options:
   - -O2
   - -threaded
   - -Wall
+
+default-extensions:
+  - ApplicativeDo
+  - DeriveFunctor
+  - NamedFieldPuns
+  - NumDecimals
+  - RankNTypes
+  - RecordWildCards
+  - TypeApplications
+  - ViewPatterns
 
 executable:
   main: Main.hs
